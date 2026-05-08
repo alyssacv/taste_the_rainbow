@@ -44,7 +44,6 @@ actual_temperature <- lapply(filenames,function(i) read.csv(i)%>% mutate(file=i)
   mutate(treatment=parse_number(file))%>%
   select(-file)%>%
   mutate(date=force_tz(mdy_hm(date),"US/Hawaii"))%>%
-  #filter(treatment==35)%>%
   filter(date>="2021-08-12 10:00",date<="2021-08-12 16:25")%>%
   mutate(treatment=as.factor(treatment))%>%
   mutate(start=force_tz(ymd_hm("2021-08-12 10:00"),"US/Hawaii"))%>%
