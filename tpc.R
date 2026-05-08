@@ -5,11 +5,17 @@ library(nls.multstart)
 library(broom)
 library(minpack.lm)
 library(ggridges)
+library(gt)
+library(gridExtra)
+library(grid)
+library(flextable)
+library(officer)
 
-
-install.packages("devtools")
-library(devtools)
-devtools::install_github("padpadpadpad/rTPC")
+#RStudio Version 2026.01.2+418 (2026.01.2+418)
+#to use rTPC with all equations we need to install from github. first install pak (agree to install the "remotes" dependency), then install rTPC via github.
+install.packages("pak")
+library("pak")
+pak::pak("padpadpadpad/rTPC")
 library(rTPC)
 
 ############# FORMAT INPUT DATA ################################# #####
@@ -43,10 +49,35 @@ for (i in c(1:49)){
 
   output_overall <- output_overall %>%
     bind_rows(tibble(model = mod, aic = AIC(fit))) %>%
-    arrange(aic) %>%
-    distinct()
+    distinct(model,aic,.keep_all=TRUE)%>%
+    arrange(aic)
+    
 }
+
+output_overall
 #best fit is taylorsexton_1972 based on minimum AIC
+
+###model selection AIC table###
+
+output_overall_table<-output_overall%>%
+  rename(`Model`=model,
+         `AIC`=aic)
+
+output_overall_table_word<-flextable(output_overall_table)%>%
+  theme_booktabs()%>%
+  colformat_double(j="AIC",digits=2)%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S10. Thermal Performance Model selection using AIC comparisons.")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  align(j="Model",align="left",part="all")%>%
+  autofit()
+
+output_overall_table_word
+
+save_as_docx(output_overall_table_word,
+             path="output/TPC_model_comparison_table.docx")
 
 ############################ APPLY ########################## #####
 get_model_names() #taylorsexton_1972
@@ -72,6 +103,42 @@ predicted <- augment(global_fit, newdata = new_data)%>%rename(rate=2)
 
 calc_params(global_fit) #thermal optimum at 33.778 degrees
 
+###global fit table###
+global_fit_params<-calc_params(global_fit)%>%
+  pivot_longer(cols=everything(),
+               names_to="parameter",
+               values_to="estimate")%>%
+  mutate(parameter=recode(parameter,
+                          rmax="Maximum Rate",
+                          topt="Topt (°C)",
+                          ctmin="CTmin (°C)",
+                          ctmax="CTmax (°C)",
+                          e="Activation Energy",
+                          eh="Deactivation Energy",
+                          q10="Q10",
+                          thermal_safety_margin="Thermal Safety Margin (°C)",
+                          thermal_tolerance="Thermal Tolerance (°C)",
+                          breadth="Thermal Breadth (°C)",
+                          skewness="Skewness"))%>%
+  rename(`Parameter`=parameter,
+         `Estimate`=estimate)
+
+global_fit_params_word<-flextable(global_fit_params)%>%
+  theme_booktabs()%>%
+  colformat_double(j="Estimate",digits=3)%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S11. Estimated Thermal Performance Curve parameters.")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  align(j="Parameter",align="left",part="all")%>%
+  autofit()
+
+global_fit_params_word
+
+save_as_docx(global_fit_params_word, path="output/global_fit_parameters_table.docx")
+
+###settlement and tcp figure###
 ggplot(data)+
   geom_point(aes(temp,rate))+
   geom_smooth(aes(temp,rate),data=predicted, se = TRUE)

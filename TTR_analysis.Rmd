@@ -1,0 +1,820 @@
+---
+title: "TTR_markdown"
+author: "Alyssa Varela"
+date: "2026-09-01"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(janitor)
+library(rio)
+#library(readr)
+#library(mgcv)
+library(readxl)
+library(survival)
+library(survminer)
+library(lubridate)
+library(emmeans)
+library(broom)
+library(cowplot)
+library(gridExtra)
+library(patchwork)
+library(rlang)
+library(betareg)
+library(statmod)
+library(DHARMa)
+library(glmmTMB)
+library(flextable)
+library(officer)
+```
+
+# Temperature Profiles
+
+## Data
+
+```{r}
+profiles<-read_csv("data/temp_logs/apex_rainbow_profiles.csv")%>%
+  mutate(profile=as.factor(profile))
+
+filenames <- list.files(path = "data/temp_logs", pattern = "\\d+\\.csv$",full.names=TRUE)  
+
+actual_temperature <- lapply(filenames,function(i) read.csv(i)%>% mutate(file=i))%>% bind_rows()%>%
+  clean_names()%>%
+  mutate(treatment=parse_number(file))%>%
+  select(-file)%>%
+  mutate(date=force_tz(mdy_hm(date),"US/Hawaii"))%>%
+  filter(date>="2021-08-12 10:00",date<="2021-08-12 16:25")%>%
+  mutate(treatment=as.factor(treatment))%>%
+  mutate(start=force_tz(ymd_hm("2021-08-12 10:00"),"US/Hawaii"))%>%
+  mutate(duration=as.numeric(difftime(date,start,units="mins")))
+
+```
+
+## Plots
+
+```{r, fig.path="figs/", fig.width=7.2, fig.height=3.5}
+x_limits <- c(0, 385)
+y_limits <- c(27, 38.1)
+
+plot_1a<-ggplot(profiles)+
+  geom_line(aes(minute,setpoint,color=profile))+
+  xlab("Time (Minutes)")+
+  ylab("Temperature (°C)")+
+  theme_classic(base_size=8)+
+  scale_x_continuous(breaks=seq(0,385,60), limits = x_limits)+
+  scale_y_continuous(breaks=seq(27,38,1), limits = y_limits)+
+  scale_color_discrete(name="Treatment (°C)")+
+  theme(legend.position = "right")+
+  guides(color=guide_legend(reverse=TRUE));plot_1a
+
+plot_1b<-ggplot(actual_temperature)+
+  geom_line(aes(duration,temp,color=treatment))+
+  xlab("Time (Minutes)")+
+  ylab("Temperature (°C)")+
+  scale_color_discrete(name="Treatment (°C)")+
+  theme_classic(base_size = 8)+
+  theme(axis.ticks.y = element_line(), plot.margin = margin(0, 0, 0, 0, "cm"), legend.position = "right")+
+  scale_x_continuous(breaks=seq(0,385,60),limits = x_limits)+
+  scale_y_continuous(breaks=seq(27,38,1),limits = y_limits);plot_1b
+
+legend<- get_legend(plot_1a + theme(legend.box.margin = margin(0, 0, 0, 0, "cm"), 
+                                    legend.text = element_text(size = 7),  
+                                    legend.title = element_text(size = 8),
+                                    legend.key.size = unit(0.5, "cm")))
+
+compare<-plot_grid(plot_1a+theme(legend.position="none", plot.margin = margin(0,0,0,0.5,"cm")), 
+                   plot_1b+theme(legend.position = "none",axis.ticks.y=element_line(),
+                                 plot.margin = margin(0, 0, 0, 0.5, "cm")),
+                   nrow = 1, ncol=2, labels = c("A", "B"), hjust = c(-0.5,0.5), align='hv', scale=0.9)
+plot_1c<-plot_grid(compare, legend, rel_widths = c(0.6, 0.1))
+plot_1c
+
+ggsave("output/plot_1c.pdf",
+       plot=plot_1c,
+       width=7.2,height=3.5,units="in")
+```
+
+## Temperature Treatment Variations
+
+```{r}
+temperature_treatment_summary <- actual_temperature%>%
+  filter(date>="2021-08-12 12:40",date<="2021-08-12 13:30")%>%
+  mutate(treatment=as.factor(treatment))%>%
+  mutate(start=force_tz(ymd_hm("2021-08-12 10:00"),"US/Hawaii"))%>%
+  mutate(duration=as.numeric(difftime(date,start,units="mins")))%>%
+  mutate(treatment=as.numeric(as.character(treatment)))%>%
+  filter(treatment!=27)%>%
+  group_by(treatment)%>%
+  summarize(average=mean(temp,na.rm=TRUE),
+            max=max(temp,na.rm=TRUE),
+            min=min(temp,na.rm=TRUE),
+            sd=sd(temp,na.rm=TRUE))%>%
+  mutate(across(c(average,max,min,sd),\(x) round(x,2)))
+
+control_temperature_summary <- actual_temperature%>%
+  filter(date>="2021-08-12 10:00",date<="2021-08-12 16:25")%>%
+  mutate(treatment=as.numeric(as.character(treatment)))%>%
+  filter(treatment==27)%>%
+  group_by(treatment)%>%
+  summarize(average=mean(temp,na.rm=TRUE),
+            max=max(temp,na.rm=TRUE),
+            min=min(temp,na.rm=TRUE),
+            sd=sd(temp,na.rm=TRUE))%>%
+  mutate(across(c(average,max,min,sd),round,2))
+```
+
+## Temperature Treatment Variation Table
+
+```{r}
+control_temperature_summary<-control_temperature_summary%>%
+  mutate(period="Full 6h exposure")
+
+temperature_treatment_summary<-temperature_treatment_summary%>%
+  mutate(period="Peak exposure")
+
+full_temperature_table<-bind_rows(control_temperature_summary,temperature_treatment_summary)%>%
+  mutate(`Mean ± SD (°C)`=paste0(average," ± ",sd))%>%
+  select(treatment,`Mean ± SD (°C)`,max,min,period)%>%
+  rename(`Treatment (°C)`=treatment,
+         `Maximum (°C)`=max,
+         `Minimum (°C)`=min,
+         `Treatment Period`=period,)
+
+full_temperature_table_word<-flextable(full_temperature_table)%>%
+  theme_booktabs()%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S1. Measured temperature variations for the control (27°C) and temperature treatments (28-38°C).")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  autofit()
+  
+
+full_temperature_table_word
+
+save_as_docx(full_temperature_table_word,
+             path="output/full_temperature_summary_table.docx")
+```
+
+## Water Temperature For Recruit Grow Out
+
+### Data
+
+```{r}
+himb_temp_grow_out_2021<-read.table("data/temp_data_grow_out/HIMB_temp_grow_out_2021.txt",header=TRUE,comment.char="",fill=TRUE)%>%
+  clean_names()%>%
+  rename(year=1,
+         month=2,
+         day=3,
+         hour=4,
+         minute=5)%>%
+  filter(year!="#yr")%>%
+  mutate(date=ymd_hm(paste(year,month,day,hour,minute)))%>%
+  select(date,wtmp)
+
+himb_temp_grow_out_2022<-read.table("data/temp_data_grow_out/HIMB_temp_grow_out_2022.txt",header=TRUE,comment.char="",fill=TRUE)%>%
+  clean_names()%>%
+  rename(year=1,
+         month=2,
+         day=3,
+         hour=4,
+         minute=5)%>%
+  filter(year!="#yr")%>%
+  mutate(date=ymd_hm(paste(year,month,day,hour,minute)))%>%
+  select(date,wtmp)
+
+himb_temp_grow_out_full<-bind_rows(himb_temp_grow_out_2021,himb_temp_grow_out_2022)%>%
+  filter(date>="2021-08-01 00:00",
+         date<="2022-02-01 00:00")%>%
+  distinct(date,.keep_all=TRUE)%>%
+  arrange(date)%>%
+  rename(temperature=wtmp)%>%
+  mutate(temperature=as.numeric(temperature))%>%
+  mutate(temperature=na_if(temperature,999))
+
+average_grow_out_temp<-himb_temp_grow_out_full%>%
+  filter(date>="2021-08-12 00:00",
+         date<="2022-01-26 23:59")%>%
+  summarize(mean_temp=mean(temperature,na.rm=TRUE))
+
+average_grow_out_temp
+
+```
+
+### Plot
+
+```{r temperature_grow_out, fig.width=5.5, fig.height=3.5}
+#supplemental Figure S1
+
+water_temp_growout_plot <- ggplot(himb_temp_grow_out_full)+
+  geom_line(aes(date,temperature))+
+  xlab("Date")+
+  ylab("Temperature (°C)")+
+  theme_classic(base_size = 8)+
+  geom_vline(xintercept=as.numeric(ymd_hm("2021-08-12 00:00")),linetype="dashed",color="green",size=0.5)+
+  #geom_vline(xintercept=as.numeric(ymd_hm("2022-01-26 00:00")),linetype="dashed",color="red",size=0.5)+
+  #annotate("segment",x=ymd_hm("2021-08-12 00:00"),xend=ymd_hm("2021-08-12 00:00"),y=23.5,yend=23,arrow=arrow(length=unit(0.15,"cm")))+
+  annotate("segment",x=ymd_hm("2021-08-19 00:00"),xend=ymd_hm("2021-08-19 00:00"),y=23.5,yend=23,arrow=arrow(length=unit(0.15,"cm")))+
+  annotate("segment",x=ymd_hm("2021-08-26 00:00"),xend=ymd_hm("2021-08-26 00:00"),y=23.5,yend=23,arrow=arrow(length=unit(0.15,"cm")))+
+  annotate("segment",x=ymd_hm("2021-09-02 00:00"),xend=ymd_hm("2021-09-02 00:00"),y=23.5,yend=23,arrow=arrow(length=unit(0.15,"cm")))+
+  annotate("segment",x=ymd_hm("2021-09-16 00:00"),xend=ymd_hm("2021-09-16 00:00"),y=23.5,yend=23,arrow=arrow(length=unit(0.15,"cm")))+
+  annotate("segment",x=ymd_hm("2022-01-26 00:00"),xend=ymd_hm("2022-01-26 00:00"),y=23.5,yend=23,arrow=arrow(length=unit(0.15,"cm")))+
+  #annotate("text",x=ymd_hm("2021-08-12 00:00"),y=23.7,label="settlement",size=2.5)+
+  annotate("text",x=ymd_hm("2021-08-19 00:00"),y=23.7,label="W1",size=2.5)+
+  annotate("text",x=ymd_hm("2021-08-26 00:00"),y=23.7,label="W2",size=2.5)+
+  annotate("text",x=ymd_hm("2021-09-02 00:00"),y=23.7,label="W3",size=2.5)+
+  annotate("text",x=ymd_hm("2021-09-16 00:00"),y=23.7,label="W5",size=2.5)+
+  annotate("text",x=ymd_hm("2022-01-26 00:00"),y=23.7,label="W24",size=2.5)+
+  #geom_hline(yintercept=average_grow_out_temp$mean_temp,linetype="dashed", color = "black",size=0.5)+
+  scale_x_datetime(date_breaks="1 month",
+                   date_labels="%b",
+                   limits=c(ymd_hm("2021-08-01 00:00"), ymd_hm("2022-02-01 00:00")))
+
+water_temp_growout_plot
+
+ggsave("output/water_temp_growout_plot.pdf",
+       plot=water_temp_growout_plot,
+       width=5.5,height=3.5,units="in")
+
+```
+
+# Larval Survivorship
+
+## Data
+
+```{r}
+larval_survivorship_24hrs<-readxl::read_xlsx("data/larvae_counts.xlsx", sheet = 2)%>%
+  clean_names()%>%
+  select(-c(x5,x6,x7))%>%
+  pivot_longer(!treatment,names_to = "replicate",values_to = "count")%>%
+  mutate(time=24)
+
+larval_survivorship_0hrs<-readxl::read_xlsx("data/larvae_counts.xlsx", sheet = 1)%>%
+  clean_names()%>%
+  pivot_longer(!treatment,names_to = "replicate",values_to = "count")%>%
+  mutate(time=0)
+
+larval_survivorship<-bind_rows(larval_survivorship_0hrs, larval_survivorship_24hrs)%>%
+  mutate(count=case_when(count>30~30,TRUE~count))%>%
+  rename(alive=count)%>%
+  mutate(dead=30-alive)
+
+table(larval_survivorship$alive)
+levels(as.factor(larval_survivorship$treatment))
+
+```
+
+## Statistical Analysis
+
+```{r}
+larval_survivorship_glmmtmb <- glmmTMB(cbind(alive,dead)~as.factor(treatment)*as.factor(time),family = "betabinomial", data = larval_survivorship)
+summary(larval_survivorship_glmmtmb)
+
+larval_survivorship_glmmtmb_res <-simulateResiduals(larval_survivorship_glmmtmb)
+plot(larval_survivorship_glmmtmb_res)
+
+larval_survivorship_glmmtmb_dispersion <- testDispersion(larval_survivorship_glmmtmb_res)
+larval_survivorship_glmmtmb_dispersion
+
+car::Anova(larval_survivorship_glmmtmb)
+
+##within each temperature treatment, did survivorship change between 0h and 24h?##
+emm_larval_survivorship_glmmtmb<-emmeans(larval_survivorship_glmmtmb,~time|treatment,type="response")
+summary(emm_larval_survivorship_glmmtmb)
+
+larval_survivorship_time_contrast<-contrast(emm_larval_survivorship_glmmtmb,method="pairwise")
+larval_survivorship_time_contrast
+larval_survivorship_time_contrast_holm<-test(larval_survivorship_time_contrast,by=NULL,adjust="holm")
+larval_survivorship_time_contrast_holm
+
+##how was survivorship different compared to control between 0h and 24h
+emm_larval_survivorship_trt_ctrl<- emmeans(larval_survivorship_glmmtmb, ~ treatment | time, type="response")
+summary(emm_larval_survivorship_trt_ctrl)
+
+larval_survivorship_trt_ctrl_contrast<- contrast(emm_larval_survivorship_trt_ctrl,method="trt.vs.ctrl", ref=1) ###make table 
+larval_survivorship_trt_ctrl_contrast
+```
+
+## Plot
+
+```{r, fig.width=5.5, fig.height=3.5}
+
+larval_survivorship_plot <- ggplot(larval_survivorship)+
+  geom_jitter(aes(treatment, alive, color=as.factor(time)),height = 0, width = 0.4)+
+  geom_smooth(aes(treatment, alive, color=as.factor(time),fill=as.factor(time)),alpha=0.2)+ 
+  scale_x_continuous(breaks=seq(27,38,1))+
+  scale_y_continuous(breaks=seq(0,30,5))+
+  xlab("Treatment (°C)")+
+  ylab("Number of Intact Larvae")+
+  scale_color_discrete("Time (Hours)")+
+  scale_fill_discrete("Time (Hours)")+
+  theme_classic(base_size = 8)+
+  theme(legend.position = c(0.14,0.20),legend.title = element_text (size=8))+
+  annotate("text",27,15,label="Treatment p<0.001\nTime p<0.001\nTreatment*Time p<0.001",hjust=0, size=2.89)
+
+larval_survivorship_plot
+
+ggsave("output/larval_survivorship_plot.pdf",
+       plot=larval_survivorship_plot,
+       width=5.5,height=3.5,units="in")
+
+```
+
+## Tables
+
+```{r}
+larval_survivorship_glmmtmb_table<-as.data.frame(summary(larval_survivorship_glmmtmb)$coefficients$cond)%>%
+  rownames_to_column("term")%>%
+  rename(`Term`=term,
+         `Estimate`=Estimate,
+         `SE`=`Std. Error`,
+         `z-value`=`z value`,
+         `p-value`=`Pr(>|z|)`)%>%
+  mutate(`p-value`=ifelse(`p-value`<0.001,"<0.001",sprintf("%.3f",`p-value`)))
+
+larval_survivorship_glmmtmb_dispersion_value <-trunc(unname(larval_survivorship_glmmtmb_dispersion$statistic)*1000)/1000
+
+larval_survivorship_glmmtmb_table_word<-flextable(larval_survivorship_glmmtmb_table)%>%
+  theme_booktabs()%>%
+  colformat_double(j=c("Estimate","SE","z-value"),digits=3)%>%
+  add_footer_lines(values=paste0("DHARMa dispersion parameter= ",larval_survivorship_glmmtmb_dispersion_value,
+                                 ", p = ",larval_survivorship_glmmtmb_dispersion$p.value))%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S2. glmmTMB Beta-binomial model coefficients for larval survivorship.")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  align(j="Term",align="left",part="all")%>%
+  autofit()
+
+larval_survivorship_glmmtmb_table_word
+
+save_as_docx(larval_survivorship_glmmtmb_table_word,
+             path="output/larval_survivorship_glmmtmb_table.docx")
+
+larval_survivorship_anova<-car::Anova(larval_survivorship_glmmtmb)%>%
+  as.data.frame()%>%
+  rownames_to_column("effect")%>%
+  mutate(`Pr(>Chisq)`=case_when(`Pr(>Chisq)`<0.001~"<0.001",TRUE~sprintf("%.3f",`Pr(>Chisq)`)))%>%
+  select(effect,Chisq,Df,`Pr(>Chisq)`)%>%
+  rename(`Effect`=effect,
+         `χ²`=Chisq,
+         `df`=Df,
+         `p-value`=`Pr(>Chisq)`)
+
+larval_survivorship_anova_word<-flextable(larval_survivorship_anova)%>%
+  theme_booktabs()%>%
+  colformat_double(j="χ²",digits=3)%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S3. Beta-binomial model results for larval survivorship.")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  align(j="Effect",align="left",part="all")%>%
+  autofit()
+
+larval_survivorship_anova_word
+
+save_as_docx(larval_survivorship_anova_word,
+             path="output/larval_survivorship_anova_table.docx")
+
+larval_survivorship_contrast_table<-larval_survivorship_time_contrast_holm%>%
+  as.data.frame()%>%
+  select(treatment,contrast,odds.ratio,SE,z.ratio,p.value)%>%
+  mutate(p.value=case_when(p.value<0.001~"<0.001", TRUE~sprintf("%.3f",p.value)))%>%
+  rename(`Treatment (°C)`=treatment,
+         `Comparison`=contrast,
+         `Odds Ratio`=odds.ratio,
+         `SE`=SE,
+         `z-ratio`=z.ratio,
+         `p-value`=p.value)
+
+larval_survivorship_contrast_table_word<-flextable(larval_survivorship_contrast_table)%>%
+  theme_booktabs()%>%
+  colformat_double(j=c("Odds Ratio","SE","z-ratio"),digits=3)%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S4. Post-hoc comparisons of larval survivorship between observation times within each temperature treatment. Holm-adjusted across the 12 comparisons.")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  autofit()
+
+larval_survivorship_contrast_table_word
+
+save_as_docx(larval_survivorship_contrast_table_word,
+             path="output/larval_survivorship_contrast_table.docx")
+
+larval_survivorship_contrast_trt_ctrl_table<-larval_survivorship_trt_ctrl_contrast%>%
+  as.data.frame()%>%
+  select(time,contrast,odds.ratio,SE,z.ratio,p.value)%>%
+  mutate(p.value=case_when(p.value<0.001~"<0.001", TRUE~sprintf("%.3f",p.value)))%>%
+  rename(`Time (h)`=time,
+         `Comparison`=contrast,
+         `Odds Ratio`=odds.ratio,
+         `SE`=SE,
+         `z-ratio`=z.ratio,
+         `p-value`=p.value)
+
+larval_survivorship_contrast_trt_ctrl_table_word<-flextable(larval_survivorship_contrast_trt_ctrl_table)%>%
+  theme_booktabs()%>%
+  colformat_double(j=c("Odds Ratio","SE","z-ratio"),digits=3)%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S5. Post-hoc comparisons of comparison of changes in larval survivorship from 0 h to 24 h between elevated temperature treatments and the 27°C control.")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  autofit()
+
+larval_survivorship_contrast_trt_ctrl_table_word
+
+save_as_docx(larval_survivorship_contrast_trt_ctrl_table_word,
+             path="output/larval_survivorship_contrast_trt_ctrl_table.docx")
+```
+
+# Initial Settlement
+
+## Data
+
+```{r}
+initial_settlement <- lapply(1:12, function(i) read_excel("data/settlement_counts.xlsx", sheet = i))%>%
+  bind_rows()%>%
+  clean_names()%>%
+  rename(treatment=temp)%>%
+  group_by(treatment)%>%
+  mutate(average= mean(spat, na.rm = TRUE))%>%
+  filter(plug!=156)%>%
+  mutate(chamber = interaction(treatment, replicate, drop = TRUE))
+
+summary(initial_settlement)
+
+table(initial_settlement$treatment,initial_settlement$replicate)
+
+levels(as.factor(initial_settlement$treatment))
+
+str(initial_settlement)
+```
+
+## Statistical Analysis
+
+```{r}
+initial_settlement_model<-MASS::glm.nb(spat~as.factor(treatment),data=initial_settlement)
+summary(initial_settlement_model)
+
+initial_settlement_model$theta #dispersion
+nb_res <- simulateResiduals(initial_settlement_model)
+testZeroInflation(nb_res)
+
+car::Anova(initial_settlement_model)
+
+emm_treatment_ambient <- emmeans(initial_settlement_model, ~ treatment, type= "response")
+emm_treatment_ambient
+
+initial_settlement_contrast <- contrast(emm_treatment_ambient,"trt.vs.ctrl", ref=1)
+initial_settlement_contrast
+
+```
+
+## Plot
+
+```{r, fig.width=5.5, fig.height=3.5}
+x_positions_1 <- c(32)
+x_positions_2 <- c(33,35,36)
+x_positions_3 <- c(34,38)
+
+initial_settlement_plot <- ggplot(initial_settlement)+
+  geom_jitter(aes(treatment, spat, color=as.factor(treatment)),height = 0, width = 0.2)+
+  geom_line(aes(treatment,average))+
+  geom_hline(aes(yintercept = 1.041667), linetype="dashed",size=0.5)+
+  geom_point(aes(treatment, average, color=as.factor(treatment)),size=4,pch=21,fill="white", stroke=1)+
+  scale_x_continuous(breaks=seq(27,38,1))+
+  xlab("Temperature (°C)")+
+  ylab("Settled Juveniles (1 Week)")+
+  scale_color_discrete("Treatment (°C)")+
+  theme_classic(base_size = 8)+
+  theme(legend.position = "none")+
+  annotate("text",27,15,label="Treatment p<0.001",hjust=0, size=2.98)+
+  map(x_positions_1, ~annotate("text", .x, -1, label="***", size=5))+
+  map(x_positions_2, ~annotate("text", .x, -1, label="**", size=5))+
+  map(x_positions_3, ~annotate("text", .x, -1, label="*", size=5))
+
+initial_settlement_plot
+
+ggsave("output/initial_settlement_plot.pdf",
+       plot=initial_settlement_plot,
+       width=5.5,height=3.5,units="in")
+
+```
+
+## Tables
+
+```{r}
+initial_settlement_glm_table<-as.data.frame(summary(initial_settlement_model)$coefficients)%>%
+  rownames_to_column("term")%>%
+  rename(`Term`=term,
+         `Estimate`=Estimate,
+         `SE`=`Std. Error`,
+         `z-value`=`z value`,
+         `p-value`=`Pr(>|z|)`)%>%
+  mutate(`p-value`=case_when(`p-value`<0.001~"<0.001",TRUE~sprintf("%.3f",trunc(`p-value`*1000)/1000)))
+
+initial_settlement_glm_table_word<-flextable(initial_settlement_glm_table)%>%
+  theme_booktabs()%>%
+  colformat_double(j=c("Estimate","SE","z-value"),digits=3)%>%
+  add_footer_lines(values=paste0("Negative-binomial dispersion parameter = ",trunc(initial_settlement_model$theta*1000)/1000))%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S6. Negative-binomial model coefficients for initial settlement.")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  align(j="Term",align="left",part="all")%>%
+  autofit()
+
+initial_settlement_glm_table_word
+
+save_as_docx(initial_settlement_glm_table_word,
+             path="output/initial_settlement_glm_table.docx")
+
+initial_settlement_anova<-car::Anova(initial_settlement_model)%>%
+  as.data.frame()%>%
+  rownames_to_column("effect")%>%
+  mutate(`Pr(>Chisq)`=case_when(`Pr(>Chisq)`<0.001~"<0.001",TRUE~sprintf("%.3f",trunc(`Pr(>Chisq)`*1000)/1000)))%>%
+  select(effect,`LR Chisq`,Df,`Pr(>Chisq)`)%>%
+  rename(`Effect`=effect,
+         `χ²`=`LR Chisq`,
+         `df`=Df,
+         `p-value`=`Pr(>Chisq)`)
+
+initial_settlement_anova_word<-flextable(initial_settlement_anova)%>%
+  theme_booktabs()%>%
+  colformat_double(j="χ²",digits=3)%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S7. Negative-binomial model results for initial settlement.")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  align(j="Effect",align="left",part="all")%>%
+  autofit()
+
+initial_settlement_anova_word
+
+save_as_docx(initial_settlement_anova_word,
+             path="output/initial_settlement_anova_table.docx")
+
+initial_settlement_emmeans_table<-summary(emm_treatment_ambient)%>%
+  as.data.frame()%>%
+  select(treatment,response,SE,asymp.LCL,asymp.UCL)%>%
+  rename(`Treatment (°C)`=treatment,
+         `Estimated Settlers per Plug`=response,
+         `SE`=SE,
+         `Lower 95% CI`=asymp.LCL,
+         `Upper 95% CI`=asymp.UCL)
+
+initial_settlement_emmeans_table_word<-flextable(initial_settlement_emmeans_table)%>%
+  theme_booktabs()%>%
+  colformat_double(j=c("Estimated Settlers per Plug","SE","Lower 95% CI","Upper 95% CI"),digits=3)%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S8. Estimated initial settlement for each temperature treatment.")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  autofit()
+
+initial_settlement_emmeans_table_word
+
+save_as_docx(initial_settlement_emmeans_table_word,
+             path="output/initial_settlement_emmeans_table.docx")
+
+initial_settlement_contrast_table<-initial_settlement_contrast%>%
+  as.data.frame()%>%
+  select(contrast,ratio,SE,df,z.ratio,p.value)%>%
+  mutate(p.value=case_when(p.value<0.001~"<0.001",TRUE~sprintf("%.3f",trunc(p.value*1000)/1000)))%>%
+  rename(`Comparison`=contrast,
+         `Ratio`=ratio,
+         `SE`=SE,
+         `df`=df,
+         `z-ratio`=z.ratio,
+         `p-value`=p.value)
+
+initial_settlement_contrast_table_word<-flextable(initial_settlement_contrast_table)%>%
+  theme_booktabs()%>%
+  colformat_double(j=c("Ratio","SE","z-ratio"),digits=3)%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S9. Post-hoc comparisons of initial settlement between temperature treatments (28°C-38°C) and the control (27°C ).")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  align(j="Comparison",align="left",part="all")%>%
+  autofit()
+
+initial_settlement_contrast_table_word
+
+save_as_docx(initial_settlement_contrast_table_word,
+             path="output/initial_settlement_contrast_table.docx")
+```
+
+# Post-Settlement Survivorship
+
+## Data
+
+```{r}
+week_1_survivorship<- lapply(1:12, function(i) read_excel("data/week_1_survival_counts.xlsx", sheet = i)) %>% bind_rows() %>% clean_names()
+
+week_2_survivorship<- lapply(1:12, function(i) read_excel("data/week_2_survival_counts.xlsx", sheet = i))%>% bind_rows()%>% clean_names()
+
+week_3_survivorship<- lapply(1:12, function(i) read_excel("data/week_3_survival_counts.xlsx", sheet = i))%>% bind_rows()%>% clean_names()
+
+week_5_survivorship<- lapply(1:12, function(i) read_excel("data/week_5_survival_counts.xlsx", sheet = i))%>% bind_rows()%>% clean_names()
+
+week_24_survivorship<- lapply(1:12, function(i) read_excel("data/week_24_survival_counts.xlsx", sheet = i))%>% bind_rows()%>% clean_names()
+
+post_settlement_survivorship<-bind_rows(week_1_survivorship,week_2_survivorship,week_3_survivorship,week_5_survivorship,week_24_survivorship)%>%
+  ungroup()%>%
+  group_by(plug)%>%
+  filter(any(week==1 & individual>0))%>%
+  arrange(plug,week)%>%
+  mutate(initial=individual[week==1][1])%>%
+  ungroup()%>%
+  select(plug,temp,week,individual,initial)%>%
+  rename(treatment=temp)%>%
+  rename(alive=individual)%>%
+  mutate(dead=initial-alive)%>%
+  #filter(week!=1)%>%
+  mutate(treatment=as.factor(treatment))%>%
+  mutate(week=as.numeric(as.character(week)))%>%
+  droplevels()
+
+summary(post_settlement_survivorship)
+
+post_settlement_survivorship%>%
+  filter(dead<0)
+
+post_settlement_survivorship_observed<-post_settlement_survivorship%>%
+  group_by(treatment,week)%>%
+  summarise(alive=sum(alive),
+            initial=sum(initial),
+            .groups="drop")%>%
+  mutate(survivorship=alive/initial)
+
+```
+
+## Statistical Analysis
+
+```{r}
+post_settlement_survivorship_model<-glmmTMB(cbind(alive,dead)~treatment*week+(1|plug),family="binomial",data=post_settlement_survivorship)
+summary(post_settlement_survivorship_model)
+
+post_settlement_survivorship_res<-simulateResiduals(post_settlement_survivorship_model)
+plot(post_settlement_survivorship_res)
+post_settlement_survivorship_dispersion<-testDispersion(post_settlement_survivorship_res)
+
+post_settlement_survivorship_anova<- car::Anova(post_settlement_survivorship_model)
+post_settlement_survivorship_anova
+
+emm_post_settlement_survivorship_trend<-emtrends(post_settlement_survivorship_model,~treatment, var= "week", type="response")
+summary(emm_post_settlement_survivorship_trend) 
+
+post_settlement_survivorship_trt_ctrl_contrast <- contrast(emm_post_settlement_survivorship_trend,"trt.vs.ctrl",ref=1)
+post_settlement_survivorship_trt_ctrl_contrast
+
+#gets the predicted survivorship for each treatment at each week
+#at=list(week=seq(2,24,0.1)) to created fitted smooth curves 
+post_settlement_survivorship_pred_fitted_curve<-emmeans(post_settlement_survivorship_model,~treatment|week,at=list(week=seq(1,24,0.1)),type="response")%>%
+  as.data.frame()
+
+```
+
+## Plot
+
+```{r, fig.width=5.5, fig.height=3.5}
+
+post_settlement_survivorship_pred_fitted_curve_all<-post_settlement_survivorship_pred_fitted_curve%>%
+  select(treatment,week,prob)%>%
+  arrange(treatment,week)
+
+post_settlement_survivorship_plot<-ggplot()+
+  geom_line(data=post_settlement_survivorship_pred_fitted_curve_all,
+            aes(week,prob,color=treatment,group=treatment))+
+  geom_point(data=post_settlement_survivorship_observed,
+             aes(week,survivorship,color=treatment),size=2)+
+  scale_x_continuous(breaks=c(1,2,3,5,24))+
+  scale_y_continuous(breaks=seq(0,1,0.2),limits=c(0,1))+
+  xlab("Weeks Post-settlement")+
+  ylab("Survivorship probability")+
+  scale_color_discrete("Treatment (°C)")+
+  annotate("text",1,0.4,label="Treatment p=0.097\nWeek p<0.001\nTreatment*Week p=0.009",hjust=0, size=2.98)+ #3,0.2
+  theme_classic(base_size = 8)+
+  guides(color=guide_legend(nrow=2,byrow=TRUE,title.position="top",override.aes=list(shape=16,linetype=1,size=0.7)))+
+  theme(legend.position=c(0.31,0.12),
+        legend.direction="horizontal",
+        legend.title=element_text(hjust=0),
+        legend.background=element_blank())
+
+post_settlement_survivorship_plot
+
+ggsave("output/post_settlement_survivorship_plot.pdf",
+       plot=post_settlement_survivorship_plot,
+       width=5.5,height=3.5,units="in")
+
+```
+
+## Tables
+
+```{r}
+post_settlement_survivorship_glmmtmb_table<-as.data.frame(summary(post_settlement_survivorship_model)$coefficients$cond)%>%
+  rownames_to_column("term")%>%
+  rename(`Term`=term,
+         `Estimate`=Estimate,
+         `SE`=`Std. Error`,
+         `z-value`=`z value`,
+         `p-value`=`Pr(>|z|)`)%>%
+  mutate(`p-value`=case_when(`p-value`<0.001~"<0.001",
+                             TRUE~sprintf("%.3f",trunc(`p-value`*1000)/1000)))
+
+post_settlement_survivorship_glmmtmb_table_word<-flextable(post_settlement_survivorship_glmmtmb_table)%>%
+  theme_booktabs()%>%
+  colformat_double(j=c("Estimate","SE","z-value"),digits=3)%>%
+  add_footer_lines(values=paste0("DHARMa dispersion parameter = ",
+                                 trunc(post_settlement_survivorship_dispersion$statistic*1000)/1000,
+                                 "; p = ",
+                                 sprintf("%.3f",trunc(post_settlement_survivorship_dispersion$p.value*1000)/1000),
+                                 "."))%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S12. Binomial generalized linear mixed model coefficients for post-settlement survivorship.")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  align(j="Term",align="left",part="all")%>%
+  autofit()
+
+post_settlement_survivorship_glmmtmb_table_word
+
+save_as_docx(post_settlement_survivorship_glmmtmb_table_word,
+             path="output/post_settlement_survivorship_glmmtmb_table.docx")
+
+
+post_settlement_survivorship_anova_table<-as.data.frame(post_settlement_survivorship_anova)%>%
+  rownames_to_column("effect")%>%
+  rename(`Effect`=effect,
+         `Chi-square`=Chisq,
+         `df`=Df,
+         `p-value`=`Pr(>Chisq)`)%>%
+  mutate(`Effect`=case_when(`Effect`=="treatment"~"Temperature treatment",
+                            `Effect`=="week"~"Week",
+                            TRUE~`Effect`))%>%
+  mutate(`p-value`=case_when(`p-value`<0.001~"<0.001",
+                             TRUE~sprintf("%.3f",trunc(`p-value`*1000)/1000)))
+
+post_settlement_survivorship_anova_table_word<-flextable(post_settlement_survivorship_anova_table)%>%
+  theme_booktabs()%>%
+  colformat_double(j="Chi-square",digits=3)%>%
+  add_footer_lines(values="Type II Wald chi-square tests from the binomial generalized linear mixed model.")%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S13. ANOVA for post-settlement survivorship.")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  align(j="Effect",align="left",part="all")%>%
+  autofit()
+
+post_settlement_survivorship_anova_table_word
+
+save_as_docx(post_settlement_survivorship_anova_table_word,
+             path="output/post_settlement_survivorship_anova_table.docx")
+
+post_settlement_survivorship_trt_ctrl_contrast_table<-as.data.frame(post_settlement_survivorship_trt_ctrl_contrast)%>%
+  rename(`Contrast`=contrast,
+         `Estimate`=estimate,
+         `SE`=SE,
+         `df`=df,
+         `z-ratio`=z.ratio,
+         `p-value`=p.value)%>%
+  mutate(`p-value`=case_when(`p-value`<0.001~"<0.001",
+                             TRUE~sprintf("%.3f",trunc(`p-value`*1000)/1000)))
+
+
+post_settlement_survivorship_trt_ctrl_contrast_table_word<-flextable(post_settlement_survivorship_trt_ctrl_contrast_table)%>%
+  theme_booktabs()%>%
+  colformat_double(j=c("Estimate","SE","z-ratio"),digits=3)%>%
+  add_footer_lines(values="Dunnett-adjusted comparisons of the post-settlement survivorship trend for each elevated temperature treatment (28–38°C) against the control (27°C). Estimates represent differences in the change in log odds of survivorship per week.")%>%
+  flextable::font(fontname="Times New Roman",part="all")%>%
+  fontsize(size=12,part="all")%>%
+  set_caption("Table S14. Dunnett-adjusted comparisons of post-settlement survivorship trends among temperature treatments.")%>%
+  bold(part="header")%>%
+  align(align="center",part="all")%>%
+  align(j="Contrast",align="left",part="all")%>%
+  autofit()
+
+post_settlement_survivorship_trt_ctrl_contrast_table_word
+
+save_as_docx(post_settlement_survivorship_trt_ctrl_contrast_table_word,
+             path="output/post_settlement_survivorship_trt_ctrl_contrast_table.docx")
+```
